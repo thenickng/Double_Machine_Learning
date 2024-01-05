@@ -1,0 +1,421 @@
+---
+title: "DML_RegressionTrees"
+output: html_document
+date: "2023-12-11"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(maptree)
+  library(rpart)
+  library(rpart.plot)
+  library(broom)
+
+})
+
+rm( list = ls())
+oj <- read_csv('oj.csv',
+               show_col_types = FALSE) %>% 
+  mutate(logprice = log(price))
+
+oj_wide <- oj %>% 
+  select(store, week, brand, logmove, logprice, feat) %>% 
+  pivot_longer(logmove:feat) %>% 
+  mutate(name = str_c(name, brand, sep = '_')) %>% 
+  pivot_wider(id_cols = c(store, week), names_from = name, values_from = value)
+ 
+oj_model <- oj %>% 
+  left_join(oj_wide %>% 
+              mutate(week = week + 1) %>% 
+              rename_with(~(str_c(.x, '_lag_1')), .cols = c(logmove_tropicana:feat_dominicks)),
+            by = c('store', 'week')) %>% 
+  left_join(oj_wide %>% 
+              mutate(week = week + 2) %>% 
+              rename_with(~(str_c(.x, '_lag_2')), .cols = c(logmove_tropicana:feat_dominicks)),
+            by = c('store', 'week')) %>% 
+  left_join(oj_wide %>% 
+              mutate(week = week + 3) %>% 
+              rename_with(~(str_c(.x, '_lag_3')), .cols = c(logmove_tropicana:feat_dominicks)),
+            by = c('store', 'week')) %>% 
+  mutate(brand = factor(brand),
+         week = week - min(week),
+         id = row_number()) %>% 
+  select(-SSTRVOL, -CPWVOL5) %>% 
+  na.omit()
+
+```
+
+### Full Model
+
+```{r}
+
+tree_q_full_gen <- rpart(
+  as.formula(logmove ~ (. -logprice -price -feat -store -id)), 
+  data = oj_model,
+  method = "anova",
+  cp = 0.03
+)
+
+tree_p_full_gen <- rpart(
+  as.formula(logprice ~ (. -logmove -price -feat -store -id)), 
+  data = oj_model,
+  method = "anova",
+  cp = 0.03
+)
+
+```
+
+### Split Models
+
+```{r}
+
+
+first_half <- oj_model %>% slice_sample(prop = 0.5)
+
+second_half <- oj_model %>% anti_join(first_half, by = 'id')
+
+tree_q_first_half_gen <- rpart(
+  as.formula(logmove ~ (. -logprice -price -feat -store -id)), 
+  data = first_half, 
+  method = "anova",
+  cp = 0.03
+)
+
+
+tree_q_second_half_gen <- rpart(
+  as.formula(logmove ~ (. -logprice -price -feat -store -id)), 
+  data = second_half, 
+  method = "anova",
+  cp = 0.03
+)
+
+tree_p_first_half_gen <- rpart(
+  as.formula(logprice ~ (. -logmove -price -feat -store -id)), 
+  data = first_half, 
+  method = "anova",
+  cp = 0.03
+)
+
+tree_p_second_half_gen <- rpart(
+  as.formula(logprice ~ (. -logmove -price -feat -store -id)), 
+  data = second_half, 
+  method = "anova",
+  cp = 0.03
+)
+```
+
+### Full Brand Models
+```{r}
+tree_q_full_dm <-
+  rpart(
+    as.formula(logmove ~ (. -logprice -price -feat -store -id)), 
+    data = oj_model %>% filter(brand == 'dominicks'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+tree_p_full_dm <- 
+  rpart(
+    as.formula(logprice ~ (. -logmove -price -feat -store -id)), 
+    data = oj_model %>% filter(brand == 'dominicks'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+tree_q_full_mm <-
+  rpart(
+    as.formula(logmove ~ (. -logprice -price -feat -store -id)), 
+    data = oj_model %>% filter(brand == 'minute.maid'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+tree_p_full_mm <- 
+  rpart(
+    as.formula(logprice ~ (. -logmove -price -feat -store -id)), 
+    data = oj_model %>% filter(brand == 'minute.maid'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+tree_q_full_tp <-
+  rpart(
+    as.formula(logmove ~ (. -logprice -price -feat -store -id)), 
+    data = oj_model %>% filter(brand == 'tropicana'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+tree_p_full_tp <- 
+  rpart(
+    as.formula(logprice ~ (. -logmove -price -feat -store -id)), 
+    data = oj_model %>% filter(brand == 'tropicana'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+```
+
+### Split Brand Models First Half
+
+```{r}
+
+tree_q_first_half_dm <-
+  rpart(
+    as.formula(logmove ~ (. -logprice -price -feat -store -id)), 
+    data = first_half %>% filter(brand == 'dominicks'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+tree_p_first_half_dm <- 
+  rpart(
+    as.formula(logprice ~ (. -logmove -price -feat -store -id)), 
+    data = first_half %>% filter(brand == 'dominicks'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+tree_q_first_half_mm <-
+  rpart(
+    as.formula(logmove ~ (. -logprice -price -feat -store -id)), 
+    data = first_half %>% filter(brand == 'minute.maid'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+tree_p_first_half_mm <- 
+  rpart(
+    as.formula(logprice ~ (. -logmove -price -feat -store -id)), 
+    data = first_half %>% filter(brand == 'minute.maid'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+tree_q_first_half_tp <-
+  rpart(
+    as.formula(logmove ~ (. -logprice -price -feat -store -id)), 
+    data = first_half %>% filter(brand == 'tropicana'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+tree_p_first_half_tp <- 
+  rpart(
+    as.formula(logprice ~ (. -logmove -price -feat -store -id)), 
+    data = first_half %>% filter(brand == 'tropicana'), 
+    method = "anova",
+    cp = 0.03
+  )
+```
+
+### Second Half
+
+```{r}
+
+tree_q_second_half_dm <-
+  rpart(
+    as.formula(logmove ~ (. -logprice -price -feat -store -id)), 
+    data = second_half %>% filter(brand == 'dominicks'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+tree_p_second_half_dm <- 
+  rpart(
+    as.formula(logprice ~ (. -logmove -price -feat -store -id)), 
+    data = second_half %>% filter(brand == 'dominicks'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+tree_q_second_half_mm <-
+  rpart(
+    as.formula(logmove ~ (. -logprice -price -feat -store -id)), 
+    data = second_half %>% filter(brand == 'minute.maid'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+tree_p_second_half_mm <- 
+  rpart(
+    as.formula(logprice ~ (. -logmove -price -feat -store -id)), 
+    data = second_half %>% filter(brand == 'minute.maid'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+tree_q_second_half_tp <-
+  rpart(
+    as.formula(logmove ~ (. -logprice -price -feat -store -id)), 
+    data = second_half %>% filter(brand == 'tropicana'), 
+    method = "anova",
+    cp = 0.03
+  )
+
+tree_p_second_half_tp <- 
+  rpart(
+    as.formula(logprice ~ (. -logmove -price -feat -store -id)), 
+    data = second_half %>% filter(brand == 'tropicana'), 
+    method = "anova",
+    cp = 0.03
+  )
+```
+
+### Combine Residuals
+
+```{r}
+resid_full_brand <- bind_rows(
+  oj_model %>% 
+    filter(brand == 'dominicks') %>% 
+    mutate(
+      q_hat = predict(tree_q_full_dm, newdata = .),
+      p_hat = predict(tree_p_full_dm, newdata = .),
+      q_resid_full_brand = logmove - q_hat,
+      p_resid_full_brand = logprice - p_hat
+    ),
+  
+  oj_model %>% 
+    filter(brand == 'minute.maid') %>% 
+    mutate(
+      q_hat = predict(tree_q_full_mm, newdata = .),
+      p_hat = predict(tree_p_full_mm, newdata = .),
+      q_resid_full_brand = logmove - q_hat,
+      p_resid_full_brand = logprice - p_hat
+    ),
+  
+  oj_model %>% 
+    filter(brand == 'tropicana') %>% 
+    mutate(
+      q_hat = predict(tree_q_full_tp, newdata = .),
+      p_hat = predict(tree_p_full_tp, newdata = .),
+      q_resid_full_brand = logmove - q_hat,
+      p_resid_full_brand = logprice - p_hat
+    )
+) %>% 
+select(store, week, brand, q_resid_full_brand, p_resid_full_brand)
+
+
+resid_half_gen <- bind_rows(
+  list(
+    second_half %>% 
+      mutate(q_hat = predict(tree_q_first_half_gen, newdata = .),
+             p_hat = predict(tree_p_first_half_gen, newdata = .),
+             q_resid_half_gen = logmove - q_hat,
+             p_resid_half_gen = logprice - p_hat),
+    first_half %>% 
+      mutate(q_hat = predict(tree_q_second_half_gen),
+             p_hat = predict(tree_p_second_half_gen),
+             q_resid_half_gen = logmove - q_hat,
+             p_resid_half_gen = logprice - p_hat)
+  )
+) %>% 
+  select(store, week, brand, q_resid_half_gen, p_resid_half_gen)
+
+resid_half_brand <- bind_rows(
+    second_half %>% 
+      filter(brand == 'dominicks') %>%
+        mutate(q_hat = predict(tree_q_first_half_dm, newdata = .),
+               p_hat = predict(tree_p_first_half_dm, newdata = .),
+               q_resid_half_brand = logmove - q_hat,
+               p_resid_half_brand = logprice - p_hat),
+    first_half %>% 
+      filter(brand == 'dominicks') %>%
+        mutate(q_hat = predict(tree_q_second_half_dm, newdata = .),
+               p_hat = predict(tree_p_second_half_dm, newdata = .),
+               q_resid_half_brand = logmove - q_hat,
+               p_resid_half_brand = logprice - p_hat),
+    second_half %>% 
+      filter(brand == 'minute.maid') %>%
+        mutate(q_hat = predict(tree_q_first_half_mm, newdata = .),
+               p_hat = predict(tree_p_first_half_mm, newdata = .),
+               q_resid_half_brand = logmove - q_hat,
+               p_resid_half_brand = logprice - p_hat),
+    first_half %>% 
+      filter(brand == 'minute.maid') %>%
+        mutate(q_hat = predict(tree_q_second_half_mm, newdata = .),
+               p_hat = predict(tree_p_second_half_mm, newdata = .),
+               q_resid_half_brand = logmove - q_hat,
+               p_resid_half_brand = logprice - p_hat),
+    second_half %>% 
+      filter(brand == 'tropicana') %>%
+        mutate(q_hat = predict(tree_q_first_half_tp, newdata = .),
+               p_hat = predict(tree_p_first_half_tp, newdata = .),
+               q_resid_half_brand = logmove - q_hat,
+               p_resid_half_brand = logprice - p_hat),
+    first_half %>% 
+      filter(brand == 'tropicna') %>%
+        mutate(q_hat = predict(tree_q_second_half_tp, newdata = .),
+               p_hat = predict(tree_p_second_half_tp, newdata = .),
+               q_resid_half_brand = logmove - q_hat,
+               p_resid_half_brand = logprice - p_hat),
+  ) %>% 
+  select(store, week, brand, q_resid_half_brand, p_resid_half_brand)
+
+
+
+
+
+oj_with_residuals <- oj_model %>% 
+  select(store, week, brand, logmove, logprice) %>% 
+  mutate(q_hat = predict(tree_q_full_gen),
+         p_hat = predict(tree_p_full_gen),
+         q_resid_full_gen = logmove - q_hat,
+         p_resid_full_gen = logprice - p_hat) %>% 
+  select(-q_hat, -p_hat) %>% 
+  left_join(resid_full_brand,
+            by = c('store', 'week', 'brand')) %>% 
+  left_join(resid_half_gen,
+            by = c('store', 'week', 'brand')) %>% 
+  left_join(resid_half_brand,
+            by = c('store', 'week', 'brand')) %>% 
+  pivot_longer(cols = q_resid_full_gen:p_resid_half_brand,
+               names_to = c('variable', 'spec'),
+               names_sep = '(?<=p|q)_resid_',
+               values_to = 'residual')
+
+
+```
+
+### Cross price elasticity
+
+```{r}
+reg_data <- oj_with_residuals %>% 
+  filter(spec == 'half_brand') %>% 
+  pivot_wider(names_from = variable,
+              values_from = residual) %>% 
+  rename(p_resid = p, q_resid = q)
+
+reg <- lm(q_resid ~ p_resid*brand, 
+          data = reg_data)
+oj_with_residuals_wide <- reg_data %>% 
+  pivot_wider(id_cols = c(store,week), names_from = brand, values_from = c(q_resid,p_resid))
+
+cross_logprice_elasticity_matrix <- function(df){
+  bind_rows(
+    lapply(unique(oj$brand), function(x){
+      lm(
+        formula(
+          str_c(
+            str_interp('q_resid_${x} ~ '),
+            str_c(str_c('p_resid_', unique(oj$brand)), collapse = ' + ')
+          )
+        ),
+        data = df
+      ) %>% 
+        tidy() %>% 
+        filter(str_detect(term, 'p_resid')) %>% 
+        mutate(q = x) %>% 
+        select(q, term, estimate) %>% 
+        pivot_wider(id_cols = q, names_from = term, values_from = estimate)
+    })
+  )
+}
+
+cross_logprice_elasticity_matrix(oj_with_residuals_wide)
+
+summary(reg)
+
+
+```

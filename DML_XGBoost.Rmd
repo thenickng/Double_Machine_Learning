@@ -1,0 +1,408 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r}
+rm(list = ls())
+
+suppressPackageStartupMessages({
+  library(xgboost)
+  library(rpart)
+  library(rpart.plot)
+  library(maptree)
+  library(janitor)
+  library(broom)
+  library(knitr)
+  library(tidyverse)
+  library(ggthemes)
+  library(scales)
+  library(kableExtra)
+})
+
+
+oj <- read.csv('oj.csv')
+reg_tree_data <- oj %>% 
+  mutate(q = exp(logmove)) %>%
+  group_by(store, week) %>%
+  mutate(weighted_mean = weighted.mean(price, q)) %>% 
+  ungroup() %>% 
+  select(weighted_mean, AGE60:CPWVOL5)
+
+fit <- rpart(as.formula(weighted_mean ~ .),
+             data = reg_tree_data,
+             method = "anova",
+             cp = 0.007)
+
+# Understand which leaf it is in
+
+oj_w_leaves <- oj %>% 
+  mutate(leaf = fit$where,
+         logprice = log(price))
+
+
+```
+
+# Double Machine Learning Data for Each Leaf
+
+```{r}
+oj_wide <- oj_w_leaves %>% 
+  select(store, week, brand, logmove, logprice, feat) %>% 
+  pivot_longer(logmove:feat) %>% 
+  mutate(name = str_c(name, brand, sep = '_')) %>% 
+  pivot_wider(id_cols = c(store, week), names_from = name, values_from = value)
+
+oj_model <- oj_w_leaves %>% 
+  left_join(oj_wide %>% 
+              mutate(week = week + 1) %>% 
+                       rename_with(~(str_c(.x, '_lag_1')), .cols = c(logmove_tropicana:feat_dominicks)),
+                     by = c('store', 'week')) %>% 
+  left_join(oj_wide %>% 
+              mutate(week = week + 2) %>% 
+                        rename_with(~(str_c(.x, '_lag_2')), .cols = c(logmove_tropicana:feat_dominicks)),
+                     by = c('store', 'week')) %>%
+              mutate(brand = factor(brand),
+                     week = factor(week),
+                     id = row_number()) %>% 
+  select(-SSTRVOL, CPWVOL5) %>% 
+  na.omit()
+
+first_half <- bind_rows(
+  lapply(unique(oj_model$leaf), function(x){
+    oj_model %>% 
+      filter(leaf == x) %>%
+      slice_sample(prop = 0.5)
+    
+  })
+)
+
+
+second_half <- oj_model %>%
+  anti_join(first_half %>% 
+              select(id),
+            by = 'id')
+
+
+```
+
+# XGBoost regression
+
+```{r}
+create_dmat <- function(dataset, outcome){
+  xgb.DMatrix(
+    data = model.matrix(
+      formula(str_interp('${outcome} ~ . -logprice -logmove -price -feat -id - leaf')), 
+      dataset
+    ), 
+    label = dataset %>% pull(outcome)
+  )
+}
+
+fit_xgboost <- function(dataset, outcome){
+  mat <- create_dmat(dataset, outcome)
+  
+  cv_fit <- xgb.cv(
+    data = mat,
+    nrounds = 100000,
+    nfold = 5,
+    early_stopping_rounds = 10,
+    verbose = 0
+  )
+  
+  return(xgboost(
+    data = mat, 
+    nrounds = cv_fit$best_iteration,
+    early_stopping_rounds = 1,
+    verbose = 0
+  ))
+}
+
+
+```
+
+
+# XGBoost Predictions
+
+```{r}
+leaf_predict <- function(leaf_num){
+  xgb_q_first_half_brand <- sapply(unique(oj$brand), function(x){
+    fit_xgboost(
+      first_half %>% 
+        filter(brand == x ,
+               leaf == leaf_num),
+      'logmove'
+    )
+  }, simplify = FALSE, USE.NAMES = TRUE)
+  
+   xgb_q_second_half_brand <- sapply(unique(oj$brand), function(x){
+     
+    fit_xgboost(
+      second_half %>% filter(brand == x,leaf == leaf_num), 
+      'logmove'
+    )
+  }, simplify=FALSE, USE.NAMES = TRUE)
+  
+  xgb_p_first_half_brand <- sapply(unique(oj$brand), function(x){
+    fit_xgboost(
+      first_half %>% filter(brand == x,leaf == leaf_num), 
+      'logprice'
+    )
+  }, simplify=FALSE, USE.NAMES = TRUE)
+  
+  xgb_p_second_half_brand <- sapply(unique(oj$brand), function(x){
+    fit_xgboost(
+      second_half %>% filter(brand == x,leaf == leaf_num), 
+      'logprice'
+    )
+  }, simplify=FALSE, USE.NAMES = TRUE)
+  
+  resid_half_brand <- bind_rows(
+    c(
+      lapply(unique(oj$brand), function(x){
+        
+        p_mat <- create_dmat(
+          second_half %>% 
+            filter(brand == x, leaf == leaf_num),
+          'logprice'
+        )
+        
+        q_mat <- create_dmat(
+          second_half %>% 
+            filter(brand == x, leaf == leaf_num),
+          'logmove'
+        )
+        
+        second_half %>% 
+          filter(brand == x, leaf == leaf_num) %>% 
+          mutate(q_hat = predict(xgb_q_first_half_brand[[x]], newdata = q_mat),
+                 p_hat = predict(xgb_p_first_half_brand[[x]], newdata = p_mat),
+                 q_resid = logmove - q_hat,
+                 p_resid = logprice - p_hat)
+      }),
+      lapply(unique(oj$brand), function(x){
+        
+        p_mat <- create_dmat(
+          first_half %>% 
+            filter(brand == x, leaf == leaf_num),
+          'logprice'
+        )
+        
+        q_mat <- create_dmat(
+          first_half %>% 
+            filter(brand == x, leaf == leaf_num),
+          'logmove'
+        )
+        
+        first_half %>% 
+          filter(brand == x, leaf == leaf_num) %>% 
+          mutate(q_hat = predict(xgb_q_second_half_brand[[x]], newdata = q_mat),
+                 p_hat = predict(xgb_p_second_half_brand[[x]], newdata = p_mat),
+                 q_resid = logmove - q_hat,
+                 p_resid = logprice - p_hat)
+      })
+    )
+  ) %>% 
+    select(store, week, brand, logmove, logprice, q_resid, p_resid, leaf)
+  
+  return(resid_half_brand)
+}
+
+```
+
+```{r}
+
+oj_with_residuals <- bind_rows(
+  lapply(
+    unique(oj_model$leaf),
+    leaf_predict
+  )
+)
+
+
+```
+# Residuals from each leaf, brand, and outcome
+
+```{r}
+resid_summary <- oj_with_residuals %>% 
+  pivot_longer(p_resid:q_resid, names_to = 'variable') %>% 
+  group_by(leaf, brand, variable) %>% 
+  summarise(min = min(value),
+            mean = mean(value),
+            median = median(value),
+            max = max(value)) %>% 
+  ungroup() %>% 
+  arrange(leaf, brand, variable)
+
+
+palette = seq_gradient_pal("green", "red")(seq(0, 1, length.out = 10))
+
+resid_summary %>% 
+  kable(format = 'html', color = 'white') %>% 
+  kable_styling() %>% 
+  column_spec(
+    kable_input = ., 
+    column = which(colnames(resid_summary) == 'min'), 
+    background = palette[round(ecdf(abs(resid_summary$min))(abs(resid_summary$min))*10)]
+  ) %>% 
+  column_spec(
+    kable_input = ., 
+    column = which(colnames(resid_summary) == 'mean'), 
+    background = palette[round(ecdf(abs(resid_summary$mean))(abs(resid_summary$mean))*10)]
+  ) %>% 
+  column_spec(
+    kable_input = ., 
+    column = which(colnames(resid_summary) == 'max'), 
+    background = palette[round(ecdf(abs(resid_summary$max))(abs(resid_summary$max))*10)]
+  ) %>% 
+  column_spec(
+    kable_input = ., 
+    column = which(colnames(resid_summary) == 'median'), 
+    background = palette[round(ecdf(abs(resid_summary$median))(abs(resid_summary$median))*10)]
+  )
+
+```
+
+# Residuals Visualized
+
+```{r}
+plot_data <- oj_with_residuals %>%
+  mutate(q_hat = logmove - q_resid,
+         p_hat = logprice - p_resid)
+
+ggplot(data = plot_data) +
+  geom_point(aes(x = q_resid, y = p_resid, color = brand), alpha = .1) +
+  facet_grid(. ~ leaf) +
+  labs(x = 'Q Residual', y = 'P Residual')
+
+ggplot(data = plot_data, aes(x = logprice, y = p_hat, color = brand)) +
+  geom_point(alpha = .05) +
+  facet_grid(. ~ leaf) +
+  geom_smooth(method = 'lm', formula = 'y~x') +
+  labs(title = 'Prediction Error for Price by Brand') +
+  geom_abline(slope = 1, intercept = 0, color = 'black', linetype = 'dotted')
+
+ggplot(data = plot_data, aes(x = logmove, y = q_hat, color = brand)) +
+  geom_point(alpha = .05) +
+  facet_grid(. ~ leaf) +
+  geom_smooth(method = 'lm', formula = 'y~x') +
+  labs(title = 'Prediction Error for Quantity by Brand') +
+  geom_abline(slope = 1, intercept = 0, color = 'black', linetype = 'dotted')
+
+```
+
+# Residual Regression Summary
+
+```{r}
+reg <- lm(q_resid ~ p_resid*brand*factor(leaf),
+          data = oj_with_residuals)
+
+summary(reg)
+
+```
+
+# Cross Price Elasticities 
+
+```{r}
+oj_with_residuals_wide <- oj_with_residuals %>%
+  pivot_wider(id_cols = c(store,week,leaf), names_from = brand, values_from = c(q_resid,p_resid))
+
+cross_logprice_elasticity_matrix <- function(df){
+  estimates <- bind_rows(
+    lapply(unique(oj$brand), function(x){
+      lm(
+        formula(
+          str_c(
+            str_interp('q_resid_${x} ~ '),
+            str_c(str_c('p_resid_', unique(oj$brand)), collapse = ' + ')
+          )
+        ),
+        data = df
+      ) %>%
+        tidy() %>%
+        filter(str_detect(term, 'p_resid')) %>%
+        mutate(q = x) %>%
+        select(q, term, estimate) %>%
+        pivot_wider(id_cols = q, names_from = term, values_from = estimate)
+    })
+  )
+    
+  p_vals <- bind_rows(
+    lapply(unique(oj$brand), function(x){
+      lm(
+        formula(
+          str_c(
+            str_interp('q_resid_${x} ~ '),
+            str_c(str_c('p_resid_', unique(oj$brand)), collapse = ' + ')
+          )
+        ),
+        data = df
+      ) %>%
+        tidy() %>%
+        filter(str_detect(term, 'p_resid')) %>%
+        mutate(q = x) %>%
+        select(q, term, p.value) %>%
+        pivot_wider(id_cols = q, names_from = term, values_from = p.value)
+    })
+  )
+  
+  estimates %>% 
+    kable() %>% 
+    kable_styling() %>% 
+    column_spec(
+      kable_input = ., 
+      column = which(colnames(estimates) == 'p_resid_tropicana'), 
+      background = ifelse(p_vals$p_resid_tropicana <= .05, 'lightgreen', 'white')
+    ) %>% 
+    column_spec(
+      kable_input = ., 
+      column = which(colnames(estimates) == 'p_resid_minute.maid'), 
+      background = ifelse(p_vals$p_resid_minute.maid <= .05, 'lightgreen', 'white')
+    ) %>% 
+    column_spec(
+      kable_input = ., 
+      column = which(colnames(estimates) == 'p_resid_dominicks'), 
+      background = ifelse(p_vals$p_resid_dominicks <= .05, 'lightgreen', 'white')
+    )
+}
+
+
+```
+
+# Differentiate Leaf with Income Class
+
+```{r}
+oj_with_residuals %>% 
+  group_by(brand, leaf) %>% 
+  summarise(mean_price = mean(exp(logprice))) %>% 
+  pivot_wider(names_from = brand, values_from = mean_price)
+
+```
+
+**Leaf 2** (Lowest Income Class)
+```{r}
+cross_logprice_elasticity_matrix(oj_with_residuals_wide %>% filter(leaf == 2))
+
+```
+
+**Leaf 4** (Middle Income Class)
+```{r}
+cross_logprice_elasticity_matrix(oj_with_residuals_wide %>% filter(leaf == 4))
+
+```
+
+**Leaf 5** (Highest Income Class)
+```{r}
+cross_logprice_elasticity_matrix(oj_with_residuals_wide %>% filter(leaf == 5))
+
+```
+
+
+
+
+
+
+
+

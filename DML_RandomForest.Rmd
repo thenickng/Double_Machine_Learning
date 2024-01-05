@@ -1,0 +1,354 @@
+---
+title: "Double Machine Learning - RandomForest"
+
+output: html_document
+---
+
+```{r}
+
+rm(list = ls())
+
+suppressPackageStartupMessages({
+  library(randomForest)
+  library(data.table)
+  library(janitor)
+  library(broom)
+  library(knitr)
+  library(tidyverse)
+})
+```
+
+```{r}
+oj <- read_csv('oj.csv',
+               show_col_types = FALSE) %>% 
+  mutate(logprice = log(price)) %>% 
+  clean_names()
+
+oj_wide <- oj %>% 
+  select(store, week, brand, logmove, logprice, feat) %>% 
+  pivot_longer(logmove:feat) %>% 
+  mutate(name = str_c(name, brand, sep = '_')) %>% 
+  pivot_wider(id_cols = c(store, week), names_from = name, values_from = value)
+ 
+oj_model <- oj %>% 
+  left_join(oj_wide %>% 
+              mutate(week = week + 1) %>% 
+              rename_with(~(str_c(.x, '_lag_1')), .cols = c(logmove_tropicana:feat_dominicks)),
+            by = c('store', 'week')) %>% 
+  left_join(oj_wide %>% 
+              mutate(week = week + 2) %>% 
+              rename_with(~(str_c(.x, '_lag_2')), .cols = c(logmove_tropicana:feat_dominicks)),
+            by = c('store', 'week')) %>% 
+  left_join(oj_wide %>% 
+              mutate(week = week + 3) %>% 
+              rename_with(~(str_c(.x, '_lag_3')), .cols = c(logmove_tropicana:feat_dominicks)),
+            by = c('store', 'week')) %>% 
+  mutate(brand = factor(brand),
+         week = week - min(week),
+         id = row_number()) %>%
+  select(-sstrvol, -cpwvol5) %>%
+  na.omit()
+
+```
+
+
+#### Full Data/General Model
+
+```{r}
+rf_q_full_gen <- randomForest(
+  logmove ~ (. -logprice -price -feat -store -id)^2, 
+  data = oj_model, 
+  ntree = 100, 
+  keep.forest=TRUE
+)
+
+rf_p_full_gen <- randomForest(
+  logprice ~ (. -logmove -price -feat -store -id)^2, 
+  data = oj_model, 
+  ntree = 100, 
+  keep.forest=TRUE
+)
+```
+
+#### Full Data/Brand-Specific Models
+
+```{r}
+
+rf_q_full_brand <- sapply(unique(oj$brand), function(x){
+  randomForest(
+    logmove ~ (. -logprice -price -feat -store -id)^2, 
+    data = oj_model %>% filter(brand == x), 
+    ntree = 100, 
+    keep.forest=TRUE
+  )
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+rf_p_full_brand <- sapply(unique(oj$brand), function(x){
+  randomForest(
+    logprice ~ (. -logmove -price -feat -store -id)^2, 
+    data = oj_model %>% filter(brand == x), 
+    ntree = 100, 
+    keep.forest=TRUE
+  )
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+```
+
+#### Half Data/General Model
+
+```{r}
+
+first_half <- oj_model %>% 
+  slice_sample(prop = .5)
+
+second_half <- oj_model %>% 
+  anti_join(first_half %>% 
+              select(id),
+            by = 'id')
+
+rf_q_first_half_gen <- randomForest(
+  logmove ~ (. -logprice -price -feat -store -id)^2, 
+  data = first_half, 
+  ntree = 100, 
+  keep.forest=TRUE
+)
+
+rf_q_second_half_gen <- randomForest(
+  logmove ~ (. -logprice -price -feat -store -id)^2, 
+  data = second_half, 
+  ntree = 100, 
+  keep.forest=TRUE
+)
+
+rf_p_first_half_gen <- randomForest(
+  logprice ~ (. -logmove -price -feat -store -id)^2, 
+  data = second_half, 
+  ntree = 100, 
+  keep.forest=TRUE
+)
+
+rf_p_second_half_gen <- randomForest(
+  logprice ~ (. -logmove -price -feat -store -id)^2, 
+  data = second_half, 
+  ntree = 100, 
+  keep.forest=TRUE
+)
+```
+
+#### Half Data/Brand-Specific Models
+
+```{r}
+rf_q_first_half_brand <- sapply(unique(oj$brand), function(x){
+  randomForest(
+    logmove ~ (. -logprice -price -feat -store -id)^2, 
+    data = first_half %>% filter(brand == x), 
+    ntree = 100, 
+    keep.forest=TRUE
+  )
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+rf_q_second_half_brand <- sapply(unique(oj$brand), function(x){
+  randomForest(
+    logmove ~ (. -logprice -price -feat -store -id)^2, 
+    data = second_half %>% filter(brand == x), 
+    ntree = 100, 
+    keep.forest=TRUE
+  )
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+rf_p_first_half_brand <- sapply(unique(oj$brand), function(x){
+  randomForest(
+    logprice ~ (. -logmove -price -feat -store -id)^2, 
+    data = first_half %>% filter(brand == x), 
+    ntree = 100, 
+    keep.forest=TRUE
+  )
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+rf_p_second_half_brand <- sapply(unique(oj$brand), function(x){
+  randomForest(
+    logprice ~ (. -logmove -price -feat -store -id)^2, 
+    data = second_half %>% filter(brand == x), 
+    ntree = 100, 
+    keep.forest=TRUE
+  )
+}, simplify = FALSE, USE.NAMES = TRUE)
+```
+
+
+```{r}
+# Retriving Residuals
+
+resid_full_brand <- bind_rows(
+  lapply(unique(oj$brand), function(x){
+    oj_model %>% 
+      filter(brand == x) %>% 
+      mutate(q_hat = predict(rf_q_full_brand[[x]]),
+             p_hat = predict(rf_p_full_brand[[x]]),
+             q_resid_full_brand = logmove - q_hat,
+             p_resid_full_brand = logprice - p_hat)
+  })
+) %>% 
+  select(store, week, brand, q_resid_full_brand, p_resid_full_brand)
+
+resid_half_gen <- bind_rows(
+  list(
+    second_half %>% 
+      mutate(q_hat = predict(rf_q_first_half_gen, newdata = .),
+             p_hat = predict(rf_p_first_half_gen, newdata = .),
+             q_resid_half_gen = logmove - q_hat,
+             p_resid_half_gen = logprice - p_hat),
+    first_half %>% 
+      mutate(q_hat = predict(rf_q_second_half_gen),
+             p_hat = predict(rf_p_second_half_gen),
+             q_resid_half_gen = logmove - q_hat,
+             p_resid_half_gen = logprice - p_hat)
+  )
+) %>% 
+  select(store, week, brand, q_resid_half_gen, p_resid_half_gen)
+
+resid_half_brand <- bind_rows(
+  c(
+    lapply(unique(oj$brand), function(x){
+      second_half %>% 
+        filter(brand == x) %>% 
+        mutate(q_hat = predict(rf_q_first_half_brand[[x]], newdata = .),
+               p_hat = predict(rf_p_first_half_brand[[x]], newdata = .),
+               q_resid_half_brand = logmove - q_hat,
+               p_resid_half_brand = logprice - p_hat)
+    }),
+    lapply(unique(oj$brand), function(x){
+      first_half %>% 
+        filter(brand == x) %>% 
+        mutate(q_hat = predict(rf_q_second_half_brand[[x]], newdata = .),
+               p_hat = predict(rf_p_second_half_brand[[x]], newdata = .),
+               q_resid_half_brand = logmove - q_hat,
+               p_resid_half_brand = logprice - p_hat)
+    })
+  )
+) %>% 
+  select(store, week, brand, q_resid_half_brand, p_resid_half_brand)
+
+
+oj_with_residuals <- oj_model %>% 
+  select(store, week, brand, logmove, logprice) %>% 
+  mutate(q_hat = predict(rf_q_full_gen),
+         p_hat = predict(rf_p_full_gen),
+         q_resid_full_gen = logmove - q_hat,
+         p_resid_full_gen = logprice - p_hat) %>% 
+  select(-q_hat, -p_hat) %>% 
+  left_join(resid_full_brand,
+            by = c('store', 'week', 'brand')) %>% 
+  left_join(resid_half_gen,
+            by = c('store', 'week', 'brand')) %>% 
+  left_join(resid_half_brand,
+            by = c('store', 'week', 'brand')) %>% 
+  pivot_longer(cols = q_resid_full_gen:p_resid_half_brand,
+               names_to = c('variable', 'spec'),
+               names_sep = '(?<=p|q)_resid_',
+               values_to = 'residual')
+
+oj_with_residuals %>% 
+  filter(variable == 'p') %>% 
+  group_by(variable, spec) %>% 
+  summarise(min = min(residual),
+            median = median(residual),
+            mean = mean(residual),
+            max = max(residual)) %>% 
+  ungroup() %>% 
+  kable()
+
+oj_with_residuals %>% 
+  filter(variable == 'q') %>% 
+  group_by(variable, spec) %>% 
+  summarise(min = min(residual),
+            median = median(residual),
+            mean = mean(residual),
+            max = max(residual)) %>% 
+  ungroup() %>% 
+  kable()
+```
+
+# What does our residials from each dataset look like?
+
+```{r}
+
+plot_data <- oj_with_residuals %>% 
+  pivot_wider(names_from = variable, 
+              values_from = residual,
+              names_prefix = 'residual_') %>% 
+  mutate(q_hat = logmove - residual_q,
+         p_hat = logprice - residual_p)
+
+ggplot(data = plot_data) + 
+  geom_point(aes(x = residual_p, y = residual_q, color = brand), alpha = .1) + 
+  facet_grid(. ~ spec) + 
+  labs(x = 'Q Residuals', y = 'P Residual')
+```
+
+# How accurate is just one regression?
+
+```{r}
+ggplot(data = plot_data, aes(x = logprice, y = p_hat, color = brand)) + 
+  geom_point(alpha = .05) + 
+  facet_grid(. ~ spec) + 
+  geom_smooth(method = 'lm', formula = 'y~x') +
+  labs(title = 'Prediction Error for Price by Brand') + 
+  geom_abline(slope = 1, intercept = 0, color = 'black', linetype = 'dotted')
+```
+
+```{r}
+ggplot(data = plot_data, aes(x = logmove, y = q_hat, color = brand)) + 
+  geom_point(alpha = .05) + 
+  facet_grid(. ~ spec) + 
+  geom_smooth(method = 'lm', formula = 'y~x') +
+  labs(title = 'Prediction Error for Quantity by Brand') + 
+  geom_abline(slope = 1, intercept = 0, color = 'black', linetype = 'dotted')
+```
+
+
+```{r}
+reg_data <- oj_with_residuals %>% 
+  filter(spec == 'half_brand') %>% 
+  pivot_wider(names_from = variable,
+              values_from = residual) %>% 
+  rename(p_resid = p, q_resid = q)
+
+reg <- lm(q_resid ~ p_resid*brand, 
+          data = reg_data)
+
+summary(reg) %>% 
+  tidy() %>% 
+  kable()
+```
+
+# Cross Price Elasticity Matrix
+
+```{r}
+oj_with_residuals_wide <- reg_data %>% 
+  pivot_wider(id_cols = c(store,week), names_from = brand, values_from = c(q_resid,p_resid))
+
+cross_logprice_elasticity_matrix <- function(df){
+  bind_rows(
+    lapply(unique(oj$brand), function(x){
+      lm(
+        formula(
+          str_c(
+            str_interp('q_resid_${x} ~ '),
+            str_c(str_c('p_resid_', unique(oj$brand)), collapse = ' + ')
+          )
+        ),
+        data = df
+      ) %>% 
+        tidy() %>% 
+        filter(str_detect(term, 'p_resid')) %>% 
+        mutate(q = x) %>% 
+        select(q, term, estimate) %>% 
+        pivot_wider(id_cols = q, names_from = term, values_from = estimate)
+    })
+  )
+}
+
+cross_logprice_elasticity_matrix(oj_with_residuals_wide) %>% 
+  kable()
+```
