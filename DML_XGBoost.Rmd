@@ -1,5 +1,5 @@
 ---
-title: "R Notebook"
+title: "Double Machine Learning - XGBoost"
 output:
   html_document:
     df_print: paged
